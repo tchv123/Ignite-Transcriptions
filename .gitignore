@@ -1,0 +1,28 @@
+# --- Secrets & credentials ---
+.env
+*.cookies
+cookies.json
+*.pkl
+
+# --- Generated runtime data ---
+history.json
+
+# --- Python virtual environment ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# --- IDE ---
+.vscode/
+.idea/
+
+# --- Transcripts output directory ---
+# The entire לימודים/ folder on the Desktop is excluded
+# (handled outside this repo, but in case a symlink is ever created here)
+לימודים/
+
+# --- Logs ---
+*.log
