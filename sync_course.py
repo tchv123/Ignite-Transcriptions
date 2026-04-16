@@ -45,7 +45,7 @@ PANOPTO_BASE = "https://runi.cloud.panopto.eu"
 MOODLE_URL = "https://moodle.runi.ac.il"
 
 # Timeouts (seconds)
-PAGE_LOAD_TIMEOUT = 30
+PAGE_LOAD_TIMEOUT = 60
 ELEMENT_TIMEOUT = 20
 TRANSCRIPT_TIMEOUT = 40
 
@@ -236,66 +236,7 @@ def _perform_lti_handshake(driver: WebDriver) -> None:
     print("[LOGIN] Waiting for Panopto LTI handshake to complete...")
     time.sleep(5)
     print("[LOGIN] Panopto LTI handshake complete.")
-# #def _perform_lti_handshake(driver: WebDriver) -> None:
-#     """Navigate to the first Moodle course and click Panopto to establish session via LTI Handshake."""
-#     print("[LOGIN] Initiating Panopto LTI Handshake...")
-#     # 1. Ensure we are on the dashboard
-#     driver.get(f"{MOODLE_URL}/my/")
-    
-#     # 2. Scrape the course links on the dashboard and visit the first course
-#     try:
-#         WebDriverWait(driver, 30).until(
-#             lambda d: d.find_elements(By.CSS_SELECTOR, "a[href*='/course/view.php?id=']")
-#         )
-#         course_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/course/view.php?id=']")
-#         if not course_links:
-#             print("[LOGIN] No courses found on dashboard. LTI handshake failed.")
-#             return
-            
-#         first_course_url = course_links[0].get_attribute("href")
-#         print(f"[LOGIN] Visiting first course: {first_course_url}")
-#         driver.get(first_course_url)
-#     except Exception as e:
-#         print(f"[LOGIN] Error finding courses on dashboard: {e}")
-#         return
 
-#     # 3. Look for the Panopto LTI link
-#     def _find_panopto_link(d):
-#         elements = d.find_elements(By.TAG_NAME, "a")
-#         for el in elements:
-#             href = el.get_attribute("href") or ""
-#             text = el.text.lower()
-#             if "panopto" in href.lower() or "panopto" in text:
-#                 return el
-#         return None
-
-#     try:
-#         print("[LOGIN] Searching for Panopto LTI link in course...")
-#         panopto_link = WebDriverWait(driver, 30).until(_find_panopto_link)
-#         if not panopto_link:
-#             print("[LOGIN] No Panopto link found in the course. LTI handshake failed.")
-#             return
-            
-#         panopto_url = panopto_link.get_attribute("href")
-#         print(f"[LOGIN] Clicking Panopto LTI link: {panopto_url}")
-#         driver.get(panopto_url)
-#     except Exception as e:
-#         print(f"[LOGIN] Error finding Panopto LTI link: {e}")
-#         return
-
-#     # 4. Wait for the Panopto iframe/LTI handshake to complete
-#     print("[LOGIN] Waiting for Panopto LTI handshake to complete...")
-#     try:
-#         # Check if PANOPTO_BASE (or the host) appears in the page source
-#         WebDriverWait(driver, 60).until(
-#             lambda d: PANOPTO_BASE in d.page_source or "runi.cloud.panopto.eu" in d.page_source
-#         )
-#         print("[LOGIN] Panopto LTI handshake complete.")
-#         time.sleep(4)
-#     except TimeoutException:
-#         print("[LOGIN] WARNING: Panopto LTI handshake did not fully complete or timeout reached.")
-
-# ##########################
 def is_logged_out(driver: WebDriver) -> bool:
     """Return True when the browser has been redirected away from Panopto for auth."""
     url = driver.current_url.lower()
@@ -320,14 +261,25 @@ def extract_folder_id(url: str) -> str | None:
 
 
 def get_course_name(driver: WebDriver) -> str:
+    """Wait for the folder title to appear in the SPA before returning the name."""
     wait = WebDriverWait(driver, ELEMENT_TIMEOUT)
-    selectors = [(By.CSS_SELECTOR, "h1.folder-name"), (By.TAG_NAME, "h1")]
+    # Ordered from most-specific to most-generic Panopto selectors
+    selectors = [
+        (By.CSS_SELECTOR, "#contentHeaderText"),
+        (By.CSS_SELECTOR, "#contentHeader"),
+        (By.CSS_SELECTOR, "#detail-title"),
+        (By.CSS_SELECTOR, ".folder-name"),
+        (By.CSS_SELECTOR, "h1.folder-name"),
+        (By.TAG_NAME, "h1"),
+    ]
     for by, sel in selectors:
         try:
             el = wait.until(EC.visibility_of_element_located((by, sel)))
             name = el.text.strip()
-            if name: return sanitize_filename(name)
-        except: continue
+            if name:
+                return sanitize_filename(name)
+        except TimeoutException:
+            continue
     return "Unknown_Course"
 
 
@@ -336,12 +288,27 @@ def sanitize_filename(name: str) -> str:
 
 
 def scrape_session_urls(driver: WebDriver, folder_url: str) -> list[str]:
-    print(f"  [FOLDER] Loading: {folder_url}")
-    driver.get(folder_url)
-    
+    folder_id = extract_folder_id(folder_url)
+    if not folder_id:
+        print(f"  [FOLDER] WARNING: Could not extract folderID from {folder_url}. Falling back to raw URL.")
+        sorted_url = folder_url
+    else:
+        # Build an explicit sorted URL so the SPA loads the right folder in chronological order.
+        sorted_url = (
+            f"{PANOPTO_BASE}/Panopto/Pages/Sessions/List.aspx"
+            f'#folderID="{folder_id}"&sortColumn=1&sortAscending=true'
+        )
+
+    print(f"  [FOLDER] Hard-reloading to clear SPA state…")
+    driver.get("about:blank")  # flush SPA state before the real navigation
+
+    print(f"  [FOLDER] Loading (sorted): {sorted_url}")
+    driver.get(sorted_url)
+
     if is_logged_out(driver):
         login(driver)
-        driver.get(folder_url)
+        driver.get("about:blank")
+        driver.get(sorted_url)
 
     wait = WebDriverWait(driver, ELEMENT_TIMEOUT)
     try:
@@ -406,21 +373,7 @@ def open_transcript_panel(driver: WebDriver) -> bool:
         print(f"    [WARN] Could not find or click Captions tab: {e}")
         return False
 
-# def open_transcript_panel(driver: WebDriver) -> bool:
-#     wait = WebDriverWait(driver, ELEMENT_TIMEOUT)
-#     trigger_selectors = [
-#         (By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'caption')]"),
-#         (By.ID, "captions-tab"),
-#         (By.CSS_SELECTOR, "[aria-label*='aption']"),
-#     ]
-#     for by, sel in trigger_selectors:
-#         try:
-#             btn = wait.until(EC.element_to_be_clickable((by, sel)))
-#             btn.click()
-#             time.sleep(1)
-#             return True
-#         except: continue
-#     return False
+
 
 
 def scrape_transcript(driver: WebDriver) -> str | None:
