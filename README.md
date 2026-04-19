@@ -16,12 +16,12 @@ Uses a **single browser session** with a single Moodle/SSO login. Skips already-
 ### 1. Clone / open the project
 
 ```bash
-cd "C:\Users\מאור\OneDrive\מסמכים\pyton_Projects\Ignite-Transcriptions"
+cd path/to/Ignite-Transcriptions
 ```
 
 ### 2. Configure credentials
 
-Edit `.env` (already present – **never commit this file**):
+Create a `.env` file (copy from `.env.example` – **never commit this file**):
 
 ```env
 RUNI_USERNAME=your.username
@@ -48,6 +48,8 @@ https://runi.cloud.panopto.eu/Panopto/Pages/Sessions/List.aspx?...#folderID=%22.
 https://runi.cloud.panopto.eu/Panopto/Pages/Sessions/List.aspx?...#folderID=%22...%22
 ```
 
+> **Note:** The script does **not** auto-discover your enrolled courses. You must manually add each course's Panopto folder URL here. To find the URL, open the course's Panopto folder in your browser and copy the full URL from the address bar.
+
 ---
 
 ## Running
@@ -65,8 +67,9 @@ poetry run python sync_course.py
    - Each new video's transcript panel is opened and its text is extracted.
    - The transcript is saved to:
      ```
-     C:\Users\מאור\OneDrive\שולחן העבודה\לימודים\<CourseName>\Lesson_N.txt
+     <output_dir>\<CourseName>\Lesson_N.txt
      ```
+     (`output_dir` is configured near the top of `sync_course.py`)
 3. `history.json` is updated after each video so the script can resume safely.
 
 ---
@@ -74,12 +77,12 @@ poetry run python sync_course.py
 ## Output structure
 
 ```
-C:\Users\מאור\OneDrive\שולחן העבודה\לימודים\
-├── חשבונאות ניהולית\
+<output_dir>\
+├── Course Name A\
 │   ├── Lesson_1.txt
 │   ├── Lesson_2.txt
 │   └── ...
-├── מימון\
+├── Course Name B\
 │   ├── Lesson_1.txt
 │   └── ...
 └── ...
