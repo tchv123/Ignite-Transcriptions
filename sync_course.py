@@ -44,7 +44,7 @@ HISTORY_FILE = SCRIPT_DIR / "history.json"
 SERVICE_NAME = "IgniteTranscriptions"
 _USERNAME: str = ""   # set once in main(), used by re-auth call-sites
 _PASSWORD: str = ""
-_SAVE_FOLDER: Path = Path.home() / "לימודים"
+_SAVE_FOLDER: Path = Path.home() / "Transcriptions"
 
 PANOPTO_BASE = "https://runi.cloud.panopto.eu"
 MOODLE_URL = "https://moodle.runi.ac.il"
@@ -67,7 +67,7 @@ def get_credentials() -> tuple[str, str, Path]:
     """
     saved_user   = keyring.get_password(SERVICE_NAME, "username")    or ""
     saved_pass   = keyring.get_password(SERVICE_NAME, "password")    or ""
-    saved_folder = keyring.get_password(SERVICE_NAME, "save_folder") or str(Path.home() / "לימודים")
+    saved_folder = keyring.get_password(SERVICE_NAME, "save_folder") or str(Path.home() / "Transcriptions")
 
     result: dict = {}
 

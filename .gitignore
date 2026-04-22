@@ -19,10 +19,11 @@ build/
 .vscode/
 .idea/
 
+# --- PyInstaller artifacts ---
+*.spec
+
 # --- Transcripts output directory ---
-# The entire לימודים/ folder on the Desktop is excluded
-# (handled outside this repo, but in case a symlink is ever created here)
-לימודים/
+Transcriptions/
 
 # --- Logs ---
 *.log
