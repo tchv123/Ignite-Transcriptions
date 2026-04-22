@@ -1,115 +1,119 @@
 # Ignite Transcriptions — Panopto Transcript Downloader
 
-Automatically downloads lecture transcripts (captions) from Panopto via Selenium DOM scraping.
-Uses a **single browser session** with a single Moodle/SSO login. Skips already-downloaded videos.
-
-## Prerequisites
-
-- Python 3.11+
-- [Poetry](https://python-poetry.org/docs/#installation)
-- Google Chrome installed
+Automatically downloads lecture transcripts from all your Panopto courses via Selenium.
+Logs into Moodle, scans your dashboard, and saves every transcript it hasn't downloaded yet.
 
 ---
 
-## Setup
+## For Students — Just Want to Use It?
 
-### 1. Clone / open the project
+### What you need before starting
 
-```bash
-cd path/to/Ignite-Transcriptions
-```
+- **Google Chrome** installed on your computer — [download here](https://www.google.com/chrome/)
+- That's it. No Python, no setup.
 
-### 2. Configure credentials
+### Step 1 — Download the program
 
-Create a `.env` file (copy from `.env.example` – **never commit this file**):
+Download **`Ignite-Transcriptions.exe`** from the shared Drive link and save it anywhere (Desktop is fine).
 
-```env
-RUNI_USERNAME=your.username
-RUNI_PASSWORD=YourPassword
-```
+### Step 2 — Run it
 
-### 3. Install dependencies
+Double-click `Ignite-Transcriptions.exe`.
 
-```bash
-poetry install
-```
+> **Windows SmartScreen warning?** Click **"More info"** then **"Run anyway"**. This appears because the file isn't commercially signed.
 
-This creates an isolated `.venv/` and installs:
-- `selenium` — browser automation
-- `webdriver-manager` — auto-downloads the matching ChromeDriver
-- `python-dotenv` — loads `.env`
+### Step 3 — Enter your credentials
 
-### 4. Add folder URLs
+A small login window appears.
 
-Edit `panopto_links.txt` — one Panopto folder URL per line, blank lines are ignored:
+- **Moodle Username** — the username you use at `moodle.runi.ac.il`
+- **Moodle Password** — your Moodle password
+- Leave **"Remember credentials"** ticked
 
-```
-https://runi.cloud.panopto.eu/Panopto/Pages/Sessions/List.aspx?...#folderID=%22...%22
-https://runi.cloud.panopto.eu/Panopto/Pages/Sessions/List.aspx?...#folderID=%22...%22
-```
+Click **Start** (or press Enter).
 
-> **Note:** The script does **not** auto-discover your enrolled courses. You must manually add each course's Panopto folder URL here. To find the URL, open the course's Panopto folder in your browser and copy the full URL from the address bar.
+### Step 4 — Wait
 
----
+A Chrome window opens and the program runs on its own:
 
-## Running
+1. Logs into Moodle
+2. Scans your dashboard for all current courses
+3. Enters each course and finds its Panopto folder
+4. Downloads every transcript it hasn't already saved
 
-```bash
-poetry run python sync_course.py
-```
+When Chrome closes, everything is done.
 
-### What happens
+### Step 5 — Find your transcripts
 
-1. Chrome opens and logs in to Panopto via Moodle SSO (**once**).
-2. For each folder URL in `panopto_links.txt`:
-   - The course name is extracted from the page header.
-   - All video session URLs are scraped.
-   - Each new video's transcript panel is opened and its text is extracted.
-   - The transcript is saved to:
-     ```
-     <output_dir>\<CourseName>\Lesson_N.txt
-     ```
-     (`output_dir` is configured near the top of `sync_course.py`)
-3. `history.json` is updated after each video so the script can resume safely.
-
----
-
-## Output structure
+Transcripts are saved to your OneDrive desktop folder under `לימודים`:
 
 ```
-<output_dir>\
+OneDrive\שולחן העבודה\לימודים\
 ├── Course Name A\
 │   ├── Lesson_1.txt
 │   ├── Lesson_2.txt
 │   └── ...
 ├── Course Name B\
-│   ├── Lesson_1.txt
-│   └── ...
+│   └── Lesson_1.txt
 └── ...
 ```
 
----
+### Running again later
 
-## Resuming / Re-running
+Just double-click the `.exe` again. Your credentials are pre-filled — press Enter to start.
+The program skips anything already downloaded and only fetches new lectures.
 
-Re-run the same command at any time. Videos already listed in `history.json` are skipped automatically.
+### Troubleshooting
 
-To force a re-download, delete the relevant entry from `history.json` or delete the file entirely.
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
+| Problem | Fix |
 |---|---|
-| Login redirects in a loop | Check `.env` credentials |
-| No transcript found for videos | The captions tab selector may need updating — inspect the page and update `open_transcript_panel()` in `sync_course.py` |
-| ChromeDriver version mismatch | `webdriver-manager` handles this automatically; ensure Chrome is up to date |
-| Hebrew path errors | All paths use `pathlib.Path` with `utf-8` encoding — should work on Windows 10/11 |
+| SmartScreen blocks the file | Click "More info" → "Run anyway" |
+| Chrome doesn't open | Install Google Chrome |
+| Login keeps failing | Re-open the program, clear the fields, and re-enter your credentials |
+| A course is missing from the results | Open Moodle in your browser and check that the course is visible on your dashboard |
+| Want to re-download everything | Delete `history.json` (it appears next to the `.exe` after the first run) |
 
 ---
 
-## Security
+## For Developers — Running from Source
 
-- `.env`, `history.json`, and saved cookies are excluded from git via `.gitignore`.
-- Transcripts are saved outside the repository directory and are also gitignored.
+### Prerequisites
+
+- Python 3.11+
+- [Poetry](https://python-poetry.org/docs/#installation)
+- Google Chrome
+
+### Setup
+
+```bash
+# 1. Install dependencies
+cd path/to/Ignite-Transcriptions
+poetry install
+
+# 2. Run
+poetry run python sync_course.py
+```
+
+A login window will appear on first run. Credentials are stored in the Windows Credential Manager via `keyring` — no `.env` file needed.
+
+### Building the exe
+
+```bash
+poetry add --group dev pyinstaller
+
+pyinstaller --onefile --windowed \
+  --hidden-import=keyring.backends.Windows \
+  --hidden-import=keyring.backends._null \
+  --name "Ignite-Transcriptions" \
+  sync_course.py
+```
+
+Output: `dist\Ignite-Transcriptions.exe`
+
+### Project structure
+
+| File | Purpose |
+|---|---|
+| `sync_course.py` | Main script |
+| `history.json` | Tracks downloaded videos (auto-created, gitignored) |
+| `pyproject.toml` | Dependencies (Poetry) |
