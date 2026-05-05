@@ -10,23 +10,25 @@ Downloads lecture transcripts from Panopto via Selenium DOM scraping.
 """
 
 import json
+import random
 import re
 import sys
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
 
 import keyring
+import requests
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, InvalidSessionIdException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -42,6 +44,7 @@ else:
 HISTORY_FILE = SCRIPT_DIR / "history.json"
 
 SERVICE_NAME = "IgniteTranscriptions"
+LINEAR_API_URL = "https://api.linear.app/graphql"
 _USERNAME: str = ""   # set once in main(), used by re-auth call-sites
 _PASSWORD: str = ""
 _SAVE_FOLDER: Path = Path.home() / "Transcriptions"
@@ -53,21 +56,24 @@ MOODLE_URL = "https://moodle.runi.ac.il"
 PAGE_LOAD_TIMEOUT = 60
 ELEMENT_TIMEOUT = 20
 TRANSCRIPT_TIMEOUT = 40
+RENDERER_TIMEOUT_RETRIES = 3
+RENDERER_RETRY_BASE_WAIT = 8  # seconds
 
 # ---------------------------------------------------------------------------
 # Credential GUI
 # ---------------------------------------------------------------------------
 
 
-def get_credentials() -> tuple[str, str, Path]:
+def get_credentials() -> tuple[str, str, Path, str]:
     """
     Show a blocking Tkinter login window.
     Pre-fills from keyring if credentials were previously saved.
-    Returns (username, password, save_folder) on submit, or calls sys.exit(0) if closed.
+    Returns (username, password, save_folder, linear_api_key) on submit, or calls sys.exit(0) if closed.
     """
-    saved_user   = keyring.get_password(SERVICE_NAME, "username")    or ""
-    saved_pass   = keyring.get_password(SERVICE_NAME, "password")    or ""
-    saved_folder = keyring.get_password(SERVICE_NAME, "save_folder") or str(Path.home() / "Transcriptions")
+    saved_user       = keyring.get_password(SERVICE_NAME, "username")      or ""
+    saved_pass       = keyring.get_password(SERVICE_NAME, "password")      or ""
+    saved_folder     = keyring.get_password(SERVICE_NAME, "save_folder")   or str(Path.home() / "Transcriptions")
+    saved_linear_key = keyring.get_password(SERVICE_NAME, "linear_api_key") or ""
 
     result: dict = {}
 
@@ -92,13 +98,18 @@ def get_credentials() -> tuple[str, str, Path]:
             folder_var.set(path)
     tk.Button(root, text="…", command=browse, width=3).grid(row=2, column=2, padx=(0, 10), pady=8)
 
+    tk.Label(root, text="Linear API key:").grid(row=3, column=0, padx=10, pady=8, sticky="e")
+    linear_key_var = tk.StringVar(value=saved_linear_key)
+    tk.Entry(root, textvariable=linear_key_var, show="*", width=30).grid(row=3, column=1, columnspan=2, padx=10, pady=8)
+
     remember_var = tk.BooleanVar(value=True)
     tk.Checkbutton(root, text="Remember settings", variable=remember_var).grid(
-        row=3, column=0, columnspan=3, pady=4
+        row=4, column=0, columnspan=3, pady=4
     )
 
     def on_submit():
         u, p, f = user_var.get().strip(), pass_var.get().strip(), folder_var.get().strip()
+        lk = linear_key_var.get().strip()
         if not u or not p:
             messagebox.showerror("Error", "Username and password are required.")
             return
@@ -109,9 +120,17 @@ def get_credentials() -> tuple[str, str, Path]:
             keyring.set_password(SERVICE_NAME, "username",    u)
             keyring.set_password(SERVICE_NAME, "password",    p)
             keyring.set_password(SERVICE_NAME, "save_folder", f)
+            if lk:
+                keyring.set_password(SERVICE_NAME, "linear_api_key", lk)
+            else:
+                try:
+                    keyring.delete_password(SERVICE_NAME, "linear_api_key")
+                except Exception:
+                    pass
         result["username"] = u
         result["password"] = p
         result["folder"]   = f
+        result["linear_key"] = lk
         root.destroy()
 
     def on_close():
@@ -119,7 +138,7 @@ def get_credentials() -> tuple[str, str, Path]:
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     tk.Button(root, text="Start", command=on_submit, width=15).grid(
-        row=4, column=0, columnspan=3, pady=12
+        row=5, column=0, columnspan=3, pady=12
     )
     root.bind("<Return>", lambda _: on_submit())
 
@@ -127,13 +146,13 @@ def get_credentials() -> tuple[str, str, Path]:
         status_text = f"Stored credentials for: {saved_user}"
     else:
         status_text = "No stored credentials found."
-    tk.Label(root, text=status_text, fg="gray").grid(row=5, column=0, columnspan=3, pady=(0, 8))
+    tk.Label(root, text=status_text, fg="gray").grid(row=6, column=0, columnspan=3, pady=(0, 8))
 
     root.mainloop()
 
     if "username" not in result:
         sys.exit(0)
-    return result["username"], result["password"], Path(result["folder"])
+    return result["username"], result["password"], Path(result["folder"]), result.get("linear_key", "")
 
 
 # ---------------------------------------------------------------------------
@@ -155,22 +174,171 @@ def save_history(history: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Linear reporting
+# ---------------------------------------------------------------------------
+
+def _linear_api_key() -> str | None:
+    return keyring.get_password(SERVICE_NAME, "linear_api_key") or None
+
+
+def _linear_post(api_key: str, query: str, variables: dict | None = None) -> dict:
+    resp = requests.post(
+        LINEAR_API_URL,
+        json={"query": query, "variables": variables or {}},
+        headers={"Authorization": api_key, "Content-Type": "application/json"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_linear_team_id(api_key: str) -> str | None:
+    try:
+        data = _linear_post(api_key, "{ teams { nodes { id } } }")
+        nodes = data["data"]["teams"]["nodes"]
+        return nodes[0]["id"] if nodes else None
+    except Exception as exc:
+        print(f"[LINEAR] Could not fetch team ID: {exc}")
+        return None
+
+
+_CREATE_ISSUE = """
+    mutation CreateIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) { success issue { id url } }
+    }
+"""
+
+
+def report_linear_success(courses_synced: int, new_transcripts: int) -> None:
+    from datetime import datetime, timezone
+    api_key = _linear_api_key()
+    if not api_key:
+        return
+    team_id = _get_linear_team_id(api_key)
+    if not team_id:
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        result = _linear_post(api_key, _CREATE_ISSUE, {"input": {
+            "teamId": team_id,
+            "title": f"Sync completed — {new_transcripts} new transcript(s) [{ts}]",
+            "description": (
+                f"**Sync summary**\n\n"
+                f"- Courses processed: {courses_synced}\n"
+                f"- New transcripts: {new_transcripts}\n"
+                f"- Completed: {ts}\n"
+            ),
+            "priority": 0,
+        }})
+        print(f"[LINEAR] Success issue: {result['data']['issueCreate']['issue']['url']}")
+    except Exception as exc:
+        print(f"[LINEAR] Failed to report success: {exc}")
+
+
+def report_linear_error(exc: BaseException) -> None:
+    from datetime import datetime, timezone
+    api_key = _linear_api_key()
+    if not api_key:
+        return
+    team_id = _get_linear_team_id(api_key)
+    if not team_id:
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    tb_text = traceback.format_exc()
+    try:
+        _linear_post(api_key, _CREATE_ISSUE, {"input": {
+            "teamId": team_id,
+            "title": f"Sync error — {type(exc).__name__} [{ts}]",
+            "description": (
+                f"**Unhandled error during sync**\n\n"
+                f"- Exception: `{type(exc).__name__}: {exc}`\n"
+                f"- Timestamp: {ts}\n\n"
+                f"**Traceback**\n```\n{tb_text}\n```"
+            ),
+            "priority": 2,
+        }})
+        print("[LINEAR] Error issue created.")
+    except Exception as post_exc:
+        print(f"[LINEAR] Failed to report error: {post_exc}")
+
+
+# ---------------------------------------------------------------------------
 # Driver setup
 # ---------------------------------------------------------------------------
 
 
 def build_driver() -> webdriver.Chrome:
     opts = Options()
-    opts.add_argument("--start-maximized")
+    opts.add_argument("--window-size=1920,1080")
+    if sys.platform != "win32":
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_experimental_option("detach", False)
 
-    service = Service(ChromeDriverManager().install())
+    service = Service()  # Selenium Manager auto-detects Chrome and downloads matching ChromeDriver
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     return driver
+
+
+# ---------------------------------------------------------------------------
+# Session recovery
+# ---------------------------------------------------------------------------
+
+
+def _ensure_driver_alive(driver: WebDriver) -> WebDriver:
+    """Return driver if session is valid; rebuild and re-login otherwise."""
+    try:
+        driver.title
+        return driver
+    except Exception:
+        print("[SESSION] Browser session lost — rebuilding…")
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        new_driver = build_driver()
+        login(new_driver, _USERNAME, _PASSWORD)
+        return new_driver
+
+
+# ---------------------------------------------------------------------------
+# Resilient navigation
+# ---------------------------------------------------------------------------
+
+
+def resilient_get(driver: WebDriver, url: str, retries: int = RENDERER_TIMEOUT_RETRIES) -> None:
+    """
+    Wraps driver.get() with retry logic for 'Timed out receiving message from renderer'.
+    On renderer timeout: navigate to about:blank (resets renderer), wait with
+    randomised back-off, then retry. All other exceptions re-raise immediately.
+    Does NOT reduce any timeouts or skip any waits — bot detection must not be triggered.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            driver.get(url)
+            return
+        except WebDriverException as exc:
+            msg = str(exc).lower()
+            is_renderer_timeout = (
+                "timed out receiving message from renderer" in msg
+                or ("timeout" in msg and "renderer" in msg)
+            )
+            if not is_renderer_timeout or attempt == retries:
+                raise
+            wait_secs = RENDERER_RETRY_BASE_WAIT * attempt + random.uniform(2, 5)
+            print(
+                f"  [RESILIENT_GET] Renderer timeout on attempt {attempt}/{retries}. "
+                f"Clearing renderer, waiting {wait_secs:.1f}s before retry…"
+            )
+            try:
+                driver.get("about:blank")
+            except Exception:
+                pass
+            time.sleep(wait_secs)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +358,7 @@ def login(driver: WebDriver, username: str, password: str) -> None:
 
     print("[LOGIN] Navigating to Moodle to trigger SSO…")
     try:
-        driver.get(MOODLE_URL)
+        resilient_get(driver, MOODLE_URL)
     except TimeoutException:
         pass
 
@@ -287,7 +455,7 @@ def discover_panopto_folders(driver: WebDriver) -> list[str]:
     moodle_base = m.group(1) if m else MOODLE_URL
 
     print("[DISCOVER] Navigating to Moodle dashboard…")
-    driver.get(f"{moodle_base}/my/")
+    resilient_get(driver, f"{moodle_base}/my/")
     time.sleep(3)
 
     # Log (read-only) the active dashboard filter so the user can diagnose
@@ -309,7 +477,7 @@ def discover_panopto_folders(driver: WebDriver) -> list[str]:
     for idx, course_url in enumerate(course_urls, 1):
         print(f"[DISCOVER] [{idx}/{len(course_urls)}] {course_url}")
         try:
-            driver.get(course_url)
+            resilient_get(driver, course_url)
             time.sleep(2)
 
             # Find <a class="aalink stretched-link"> whose span.instancename
@@ -330,7 +498,7 @@ def discover_panopto_folders(driver: WebDriver) -> list[str]:
                 continue
 
             # Navigate to the LTI view page — Panopto loads inside an iframe
-            driver.get(panopto_link.get_attribute("href"))
+            resilient_get(driver, panopto_link.get_attribute("href"))
 
             # Wait for the iframe to appear, then switch into it and read the
             # "Open in Panopto" link href (= the full Panopto folder URL).
@@ -435,12 +603,12 @@ def scrape_session_urls(driver: WebDriver, folder_url: str) -> list[str]:
     driver.get("about:blank")
 
     print(f"  [FOLDER] Loading (sorted): {sorted_url}")
-    driver.get(sorted_url)
+    resilient_get(driver, sorted_url)
 
     if is_logged_out(driver):
         login(driver, _USERNAME, _PASSWORD)
         driver.get("about:blank")
-        driver.get(sorted_url)
+        resilient_get(driver, sorted_url)
 
     wait = WebDriverWait(driver, ELEMENT_TIMEOUT)
     try:
@@ -452,12 +620,15 @@ def scrape_session_urls(driver: WebDriver, folder_url: str) -> list[str]:
 
     links = driver.find_elements(By.CSS_SELECTOR, "a[href*='Viewer.aspx']")
     urls = []
-    seen = set()
+    seen_ids = set()
     for a in links:
         href = a.get_attribute("href")
-        if href and "Viewer.aspx?id=" in href and href not in seen:
-            urls.append(href)
-            seen.add(href)
+        if href and "Viewer.aspx?id=" in href:
+            vid_id = extract_video_id(href)
+            if vid_id and vid_id not in seen_ids:
+                urls.append(href)
+                seen_ids.add(vid_id)
+    urls.reverse()
     return urls
 
 
@@ -544,10 +715,10 @@ def process_video(driver: WebDriver, video_url: str, course_dir: Path, history: 
     video_id = extract_video_id(video_url)
     if not video_id or video_id in history: return False
 
-    driver.get(video_url)
+    resilient_get(driver, video_url)
     if is_logged_out(driver):
         login(driver, _USERNAME, _PASSWORD)
-        driver.get(video_url)
+        resilient_get(driver, video_url)
 
     time.sleep(3)
     open_transcript_panel(driver)
@@ -568,29 +739,54 @@ def process_video(driver: WebDriver, video_url: str, course_dir: Path, history: 
 
 def main() -> None:
     global _USERNAME, _PASSWORD, _SAVE_FOLDER
-    _USERNAME, _PASSWORD, _SAVE_FOLDER = get_credentials()
+    _USERNAME, _PASSWORD, _SAVE_FOLDER, _ = get_credentials()  # _ = linear key (stored to keyring)
 
     history = load_history()
     driver = build_driver()
+    courses_synced = 0
+    new_transcripts = 0
     try:
         login(driver, _USERNAME, _PASSWORD)
         folder_urls = discover_panopto_folders(driver)
 
         if not folder_urls:
             print("[MAIN] No Panopto folders found — nothing to do.")
+            report_linear_success(courses_synced=0, new_transcripts=0)
             return
 
         print(f"[MAIN] Processing {len(folder_urls)} folder(s).")
         for folder_url in folder_urls:
             print(f"\n{'='*60}")
-            session_urls = scrape_session_urls(driver, folder_url)
+            driver = _ensure_driver_alive(driver)
+            try:
+                session_urls = scrape_session_urls(driver, folder_url)
+            except InvalidSessionIdException:
+                driver = _ensure_driver_alive(driver)
+                session_urls = scrape_session_urls(driver, folder_url)
             course_name = get_course_name(driver)
             print(f"[FOLDER] Course: '{course_name}' — {len(session_urls)} session(s)")
             course_dir = _SAVE_FOLDER / course_name
             for url in session_urls:
-                process_video(driver, url, course_dir, history)
+                driver = _ensure_driver_alive(driver)
+                try:
+                    if process_video(driver, url, course_dir, history):
+                        new_transcripts += 1
+                except InvalidSessionIdException:
+                    driver = _ensure_driver_alive(driver)
+                    if process_video(driver, url, course_dir, history):
+                        new_transcripts += 1
+            courses_synced += 1
+
+        report_linear_success(courses_synced=courses_synced, new_transcripts=new_transcripts)
+
+    except Exception as exc:
+        report_linear_error(exc)
+        raise
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
