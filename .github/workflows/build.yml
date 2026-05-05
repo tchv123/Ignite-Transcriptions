@@ -1,0 +1,58 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Build Windows executable
+        run: poetry run pyinstaller Ignite-Transcriptions.spec
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ignite-Transcriptions-Windows
+          path: dist/Ignite-Transcriptions.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Build macOS app
+        run: poetry run pyinstaller Ignite-Transcriptions-mac.spec
+
+      - name: Zip .app bundle
+        run: cd dist && zip -r Ignite-Transcriptions-mac.zip Ignite-Transcriptions.app
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ignite-Transcriptions-macOS
+          path: dist/Ignite-Transcriptions-mac.zip

@@ -21,6 +21,8 @@ build/
 
 # --- PyInstaller artifacts ---
 *.spec
+!Ignite-Transcriptions.spec
+!Ignite-Transcriptions-mac.spec
 
 # --- Transcripts output directory ---
 Transcriptions/
