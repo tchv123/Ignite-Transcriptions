@@ -270,7 +270,7 @@ def report_linear_error(exc: BaseException) -> None:
 def build_driver() -> webdriver.Chrome:
     opts = Options()
     opts.add_argument("--window-size=1920,1080")
-    if sys.platform != "win32":
+    if sys.platform.startswith("linux"):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -771,10 +771,14 @@ def main() -> None:
                 try:
                     if process_video(driver, url, course_dir, history):
                         new_transcripts += 1
-                except InvalidSessionIdException:
+                except (InvalidSessionIdException, WebDriverException):
+                    print(f"  [WARN] Driver error on {url} — recovering session…")
                     driver = _ensure_driver_alive(driver)
-                    if process_video(driver, url, course_dir, history):
-                        new_transcripts += 1
+                    try:
+                        if process_video(driver, url, course_dir, history):
+                            new_transcripts += 1
+                    except Exception as e:
+                        print(f"  [SKIP] Could not process {url} after recovery: {e}")
             courses_synced += 1
 
         report_linear_success(courses_synced=courses_synced, new_transcripts=new_transcripts)
